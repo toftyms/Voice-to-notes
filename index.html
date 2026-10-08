@@ -328,12 +328,21 @@
     }
     say("");
     ctx = new (window.AudioContext || window.webkitAudioContext)();
+    try { await ctx.resume(); } catch(_) {}
     rec = new model.KaldiRecognizer(ctx.sampleRate);
+    rec.on("error", m => say("Speech error: " + (m.error || "unknown"), true));
     rec.on("result", m => { const x = m.result && m.result.text; if (x) append(x); $("live").textContent = ""; });
     rec.on("partialresult", m => { $("live").textContent = (m.result && m.result.partial) || ""; });
     src = ctx.createMediaStreamSource(stream);
     proc = ctx.createScriptProcessor(4096, 1, 1);
-    proc.onaudioprocess = e => { try { rec.acceptWaveform(e.inputBuffer); } catch(_) {} };
+    let tick = 0;
+    proc.onaudioprocess = e => {
+      try { rec.acceptWaveform(e.inputBuffer); } catch(err) { say("Audio error: " + err.message, true); }
+      const d = e.inputBuffer.getChannelData(0); let sum = 0;
+      for (let i = 0; i < d.length; i++) sum += d[i] * d[i];
+      const rms = Math.sqrt(sum / d.length);
+      if (++tick % 3 === 0 && recording) $("micLabel").textContent = "Listening… " + "\u25AE".repeat(Math.min(12, Math.round(rms * 80))) + " (tap to stop)";
+    };
     src.connect(proc); proc.connect(ctx.destination);
     try { if (navigator.wakeLock) wake = await navigator.wakeLock.request("screen"); } catch(_) {}
     recording = true;
