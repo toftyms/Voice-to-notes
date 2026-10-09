@@ -185,7 +185,7 @@
   $("ed").addEventListener("input", () => { clearTimeout(t); t = setTimeout(saveCurrent, 400); });
 
   async function leaveNote(){
-    if (recording) await stopRec();
+    if (recording || stopping) await stopRec();
     saveCurrent();
     if (current && !current.text.trim()) notes = notes.filter(n => n !== current);
     persist(); current = null; renderList(); show("list");
@@ -211,7 +211,7 @@
   };
   $("del").onclick = async () => {
     if (!confirm("Delete this note?")) return;
-    if (recording) await stopRec();
+    if (recording || stopping) await stopRec();
     notes = notes.filter(n => n !== current); persist(); current = null; renderList(); show("list");
   };
 
@@ -289,7 +289,7 @@
   $("dl").onclick = () => { $("dl").disabled = true; loadModel(); };
 
   /* ---------- dictation ---------- */
-  let recording = false, ctx, stream, proc, src, rec, wake;
+  let recording = false, ctx, stream, proc, src, rec, wake, stopping = null, stats = { sent: 0, got: 0 }, chunkSec = 0.256;
 
   function formatSpoken(s){
     return s
@@ -313,7 +313,7 @@
   }
 
   async function startRec(){
-    if (recording) return;
+    if (recording || stopping) return;
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
       say("The microphone isn't available on this page. Open the app from a secure (https) address instead of a file.", true);
       return;
@@ -327,6 +327,7 @@
       return;
     }
     say("");
+    const st = stats = { sent: 0, got: 0, finalizing: false, done: null };
     const AC = window.AudioContext || window.webkitAudioContext;
     try {
       ctx = new AC({ sampleRate: 16000 });
@@ -338,41 +339,80 @@
     }
     try { await ctx.resume(); } catch(_) {}
     rec = new model.KaldiRecognizer(ctx.sampleRate);
+    chunkSec = 4096 / ctx.sampleRate;
+    const check = () => { if (st.finalizing && st.got > st.sent && st.done) st.done(); };
     rec.on("error", m => say("Speech error: " + (m.error || "unknown"), true));
-    rec.on("result", m => { const x = m.result && m.result.text; if (x) append(x); $("live").textContent = ""; });
-    rec.on("partialresult", m => { const p = (m.result && m.result.partial) || ""; $("live").textContent = p.length > 60 ? "\u2026" + p.slice(-60) : p; });
+    rec.on("result", m => {
+      st.got++;
+      const x = m.result && m.result.text; if (x) append(x);
+      $("live").textContent = "";
+      check();
+    });
+    rec.on("partialresult", m => {
+      st.got++;
+      const p = (m.result && m.result.partial) || "";
+      $("live").textContent = p.length > 60 ? "\u2026" + p.slice(-60) : p;
+      check();
+    });
     proc = ctx.createScriptProcessor(4096, 1, 1);
-    let tick = 0;
+    let hang = 0, tick = 0;
     proc.onaudioprocess = e => {
-      try { rec.acceptWaveform(e.inputBuffer); } catch(err) { say("Audio error: " + err.message, true); }
-      const d = e.inputBuffer.getChannelData(0); let sum = 0;
+      if (!recording) return;
+      const d = e.inputBuffer.getChannelData(0);
+      let sum = 0;
       for (let i = 0; i < d.length; i++) sum += d[i] * d[i];
       const rms = Math.sqrt(sum / d.length);
-      if (++tick % 3 === 0 && recording) $("micLabel").textContent = "Listening… " + "\u25AE".repeat(Math.min(12, Math.round(rms * 80))) + " (tap to stop)";
+      // only send audio while someone is speaking (plus a short tail so sentences end cleanly)
+      if (rms > 0.008) hang = 5;
+      if (hang > 0) {
+        hang--;
+        try { rec.acceptWaveform(e.inputBuffer); st.sent++; } catch(err) { say("Audio error: " + err.message, true); }
+      }
+      if (++tick % 3 === 0) {
+        const behind = Math.max(0, st.sent - st.got) * chunkSec;
+        $("micLabel").textContent = "Listening… " + "\u25AE".repeat(Math.min(12, Math.round(rms * 80))) +
+          (behind > 3 ? "  \u00B7 catching up: " + Math.round(behind) + "s" : "");
+      }
     };
+    recording = true;
     src.connect(proc); proc.connect(ctx.destination);
     try { if (navigator.wakeLock) wake = await navigator.wakeLock.request("screen"); } catch(_) {}
-    recording = true;
     $("mic").classList.add("rec");
     $("mic").setAttribute("aria-label", "Stop dictation");
     $("micLabel").textContent = "Listening… tap to stop";
   }
 
-  async function stopRec(){
-    if (!recording) return;
+  function stopRec(){
+    if (stopping) return stopping;
+    if (!recording) return Promise.resolve();
+    stopping = doStop().finally(() => { stopping = null; });
+    return stopping;
+  }
+
+  async function doStop(){
+    const st = stats;
     recording = false;
     $("mic").classList.remove("rec");
-    $("mic").setAttribute("aria-label", "Start dictation");
-    $("micLabel").textContent = "Tap to talk";
-    try { rec.retrieveFinalResult(); } catch(_) {}
-    await new Promise(r => setTimeout(r, 600));
+    $("mic").disabled = true;
     try { proc.disconnect(); src.disconnect(); } catch(_) {}
     try { stream.getTracks().forEach(tr => tr.stop()); } catch(_) {}
     try { await ctx.close(); } catch(_) {}
+    const waitDone = new Promise(res => { st.done = res; });
+    st.finalizing = true;
+    try { rec.retrieveFinalResult(); } catch(_) { st.done(); }
+    const tm = setInterval(() => {
+      const left = Math.max(0, st.sent - st.got) * chunkSec;
+      $("micLabel").textContent = left > 1 ? "Finishing… " + Math.round(left) + "s of speech left" : "Finishing…";
+    }, 500);
+    await Promise.race([waitDone, new Promise(r => setTimeout(r, 240000))]);
+    clearInterval(tm);
     try { rec.remove(); } catch(_) {}
     try { if (wake) { await wake.release(); wake = null; } } catch(_) {}
     $("live").textContent = "";
     saveCurrent();
+    $("mic").disabled = false;
+    $("mic").setAttribute("aria-label", "Start dictation");
+    $("micLabel").textContent = "Tap to talk";
   }
 
   $("mic").onclick = () => recording ? stopRec() : startRec();
