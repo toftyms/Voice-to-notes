@@ -327,13 +327,20 @@
       return;
     }
     say("");
-    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const AC = window.AudioContext || window.webkitAudioContext;
+    try {
+      ctx = new AC({ sampleRate: 16000 });
+      src = ctx.createMediaStreamSource(stream);
+    } catch(_) {
+      try { if (ctx) ctx.close(); } catch(__) {}
+      ctx = new AC();
+      src = ctx.createMediaStreamSource(stream);
+    }
     try { await ctx.resume(); } catch(_) {}
     rec = new model.KaldiRecognizer(ctx.sampleRate);
     rec.on("error", m => say("Speech error: " + (m.error || "unknown"), true));
     rec.on("result", m => { const x = m.result && m.result.text; if (x) append(x); $("live").textContent = ""; });
-    rec.on("partialresult", m => { $("live").textContent = (m.result && m.result.partial) || ""; });
-    src = ctx.createMediaStreamSource(stream);
+    rec.on("partialresult", m => { const p = (m.result && m.result.partial) || ""; $("live").textContent = p.length > 60 ? "\u2026" + p.slice(-60) : p; });
     proc = ctx.createScriptProcessor(4096, 1, 1);
     let tick = 0;
     proc.onaudioprocess = e => {
