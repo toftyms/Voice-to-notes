@@ -60,12 +60,25 @@
   @media (prefers-reduced-motion:reduce){#mic.rec{animation:none;box-shadow:0 0 0 8px rgba(200,55,45,.3)}}
   #micLabel{margin-top:6px;font-size:14px;color:var(--muted)}
   .tip{margin:0 14px 6px;font-size:12.5px;color:var(--muted);text-align:center}
+
+  .overlay{position:fixed;inset:0;background:rgba(20,33,43,.55);display:none;align-items:flex-end;z-index:5}
+  .overlay.on{display:flex}
+  .sheet{background:var(--card);width:100%;max-height:88%;overflow:auto;border-radius:18px 18px 0 0;padding:18px 16px max(18px,env(safe-area-inset-bottom))}
+  .sheet h2{margin:0 0 6px;font-size:20px}
+  .sheet p{margin:0 0 14px;color:var(--muted);line-height:1.45;font-size:15px}
+  .sheet input{width:100%;padding:12px;border:1px solid var(--line);border-radius:10px;font-size:16px;margin-bottom:8px;background:#fff;color:var(--ink)}
+  #fxList{list-style:none;margin:14px 0;padding:0}
+  #fxList li{display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line);font-size:16px}
+  #fxList span{flex:1}
+  #fxList button{color:var(--rec);padding:6px 10px}
+  .plain{display:block;width:100%;padding:13px;margin-top:8px;border-radius:12px;border:1px solid var(--line);font-size:16px}
 </style>
 </head>
 <body>
 <header>
   <button class="hbtn" id="back" style="display:none" aria-label="Back to notes">&larr; Notes</button>
   <h1 id="title">Voice Notes</h1>
+  <button class="hbtn" id="fixBtn">Fixes</button>
 </header>
 
 <main>
@@ -99,6 +112,19 @@
     </div>
   </section>
 </main>
+
+<div class="overlay" id="fixes">
+  <div class="sheet">
+    <h2>Word fixes</h2>
+    <p>When the app keeps mishearing a word because of accent, teach it here. It swaps the wrong word for the right one automatically.</p>
+    <input id="fxFrom" placeholder="It writes&hellip; (example: tree)" autocapitalize="off" autocomplete="off">
+    <input id="fxTo" placeholder="Should be&hellip; (example: three)" autocapitalize="off" autocomplete="off">
+    <button class="primary" id="fxAdd">Add fix</button>
+    <ul id="fxList"></ul>
+    <button class="primary" id="fxApply" style="display:none">Apply fixes to this note</button>
+    <button class="plain" id="fxClose">Close</button>
+  </div>
+</div>
 
 <script>
 (() => {
@@ -301,7 +327,7 @@
   }
 
   function append(raw){
-    let s = formatSpoken(raw).trim();
+    let s = applyFixes(formatSpoken(raw)).trim();
     if (!s) return;
     const ed = $("ed"), cur = ed.value;
     const startsSentence = !cur.trim() || /[.?!]\s*$/.test(cur) || cur.endsWith("\n");
@@ -417,6 +443,44 @@
 
   $("mic").onclick = () => recording ? stopRec() : startRec();
   document.addEventListener("visibilitychange", () => { if (document.hidden && recording) stopRec(); });
+
+  /* ---------- word fixes (teach the app your accent) ---------- */
+  let fixes = [];
+  try { fixes = JSON.parse(localStorage.getItem("vn-fixes") || "[]"); } catch(_) {}
+  const esc = x => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  function applyFixes(t){
+    fixes.forEach(f => { t = t.replace(new RegExp("\\b" + esc(f.from) + "\\b", "gi"), f.to); });
+    return t;
+  }
+  function renderFixes(){
+    const ul = $("fxList"); ul.innerHTML = "";
+    fixes.forEach((f, i) => {
+      const li = document.createElement("li");
+      const sp = document.createElement("span"); sp.textContent = f.from + "  \u2192  " + f.to;
+      const b = document.createElement("button"); b.textContent = "Remove";
+      b.onclick = () => { fixes.splice(i, 1); saveFixes(); renderFixes(); };
+      li.appendChild(sp); li.appendChild(b); ul.appendChild(li);
+    });
+  }
+  function saveFixes(){ try { localStorage.setItem("vn-fixes", JSON.stringify(fixes)); } catch(_) {} }
+  $("fixBtn").onclick = () => {
+    renderFixes();
+    $("fxApply").style.display = current ? "" : "none";
+    $("fixes").classList.add("on");
+  };
+  $("fxClose").onclick = () => $("fixes").classList.remove("on");
+  $("fxAdd").onclick = () => {
+    const from = $("fxFrom").value.trim().toLowerCase(), to = $("fxTo").value.trim();
+    if (!from || !to) return;
+    fixes = fixes.filter(f => f.from !== from);
+    fixes.push({ from, to }); saveFixes();
+    $("fxFrom").value = ""; $("fxTo").value = ""; renderFixes();
+  };
+  $("fxApply").onclick = () => {
+    if (!current) return;
+    $("ed").value = applyFixes($("ed").value); saveCurrent();
+    $("fixes").classList.remove("on"); say("Fixes applied to this note.");
+  };
 
   if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
     navigator.serviceWorker.register("sw.js").catch(() => {});
